@@ -42,7 +42,7 @@ func TestDockerExecutor_Run(t *testing.T) {
 				ID:         i,
 				AnswerPath: "1.txt",
 				InputPath:  "1.txt",
-				OutputPath: fmt.Sprintf("%v.txt", i),
+				OutputPath: fmt.Sprintf("1//%v.txt", i),
 				CpuPeriod:  100000,
 				CpuQuota:   50000,
 				Timeout:    1.0,
@@ -51,7 +51,9 @@ func TestDockerExecutor_Run(t *testing.T) {
 			})
 		}
 
-		tasks[0].CodePath = "success.go"
+		//tasks[0].CodePath = "success.go"
+		// 由于judger运行在windows环境，docker 运行在wsl中，使用filepath.Join 生成的path不适用于linux环境
+		tasks[0].CodePath = "1//success.go" // filepath.Join("1", "success.go")
 		tasks[1].CodePath = "out_of_bound.go"
 		//tasks[2].CodePath = "rm.go"
 		tasks[2].CodePath = "oom.go"

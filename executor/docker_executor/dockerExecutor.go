@@ -224,6 +224,12 @@ func (d *DockerExecutor) Compile() {
 }
 
 func (d DockerExecutor) compile(input, output string) error {
+	// 保证目录存在
+	outputDir := filepath.Dir(output)
+	if outputDir != "" {
+		utils.CheckDirectoryExist(fmt.Sprintf("%s/exe/%s", ResourcePath, outputDir))
+	}
+
 	resp, err := d.cli.ContainerExecCreate(context.Background(), d.compilerContainerID, types.ExecConfig{
 		// disable optimize and inline   -gcflags '-N -l'
 		Cmd:          []string{"sh", "-c",
@@ -278,6 +284,11 @@ func (d *DockerExecutor) Run() {
 }
 
 func (d *DockerExecutor) run(task runTask) error {
+	// 保证目录存在
+	if task.OutputDirName != "" {
+		utils.CheckDirectoryExist(fmt.Sprintf("%s/output/%s", ResourcePath, task.OutputDirName))
+	}
+
 	resp, err := d.cli.ContainerCreate(context.Background(), &container.Config{
 		// echo $(tr "\n" " " < /input/1.go) | timeout 2.5 /exe > /output/1.txt
 		Cmd: []string{"sh", "-c",
