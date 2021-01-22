@@ -6,8 +6,10 @@ import (
 )
 
 type Executor interface {
+	// go 容器镜像，默认为 golang:1.15
 	SetCompilerContainer(image string) error
 
+	// 运行可执行文件的容器镜像，默认为 alpine:latest
 	SetRunnerContainer(image string) error
 
 	SetVerifier(v verifier.Verifier) error
@@ -24,11 +26,9 @@ type Executor interface {
 
 	SetVerifyConcurrency(n int) error
 
-	// 编译为二进制文件
-	//Compile(input, output string) error
-
+	// 启动编译容器
 	EnableCompiler() error
 
-	// 运行二进制文件
+	// 运行Executor
 	Execute() error
 }

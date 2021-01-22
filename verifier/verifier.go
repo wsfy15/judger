@@ -9,6 +9,7 @@ import (
 	"strings"
 )
 
+// 校验 答案 和 程序运行结果
 type Verifier interface {
 	// 返回通过了多少个case，及是否出错
 	Verify(outputFileName, answerFileName string) (int, error)
@@ -16,7 +17,6 @@ type Verifier interface {
 
 type StandardVerifier struct{}
 
-// TODO 优化错误处理
 func (StandardVerifier) Verify(outputFileName, answerFileName string) (cases int, err error) {
 	outputFd, err := os.Open(outputFileName)
 	if err != nil {
@@ -33,6 +33,7 @@ func (StandardVerifier) Verify(outputFileName, answerFileName string) (cases int
 	answerReader := bufio.NewReader(answerFd)
 
 	for {
+		// 逐行读取，一行即一个case
 		answer, err := answerReader.ReadString('\n')
 		output, anotherErr := outputReader.ReadString('\n')
 		if err != nil || anotherErr != nil {

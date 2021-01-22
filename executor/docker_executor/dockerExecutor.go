@@ -58,12 +58,12 @@ type DockerExecutor struct {
 
 	verifier verifier.Verifier
 
-	cli                   *client.Client
-	compilerContainerName string
-	compilerContainerID   string
-	runnerContainerName   string
-	quit                  bool
-	enableCompile         bool
+	cli                    *client.Client // docker client
+	compilerContainerImage string
+	compilerContainerID    string
+	runnerContainerImage   string
+	quit                   bool
+	enableCompile          bool
 }
 
 func (d *DockerExecutor) SetVerifier(v verifier.Verifier) error {
@@ -93,12 +93,12 @@ func (d *DockerExecutor) SetVerifyConcurrency(n int) error {
 }
 
 func (d *DockerExecutor) SetCompilerContainer(image string) error {
-	d.compilerContainerName = image
+	d.compilerContainerImage = image
 	return nil
 }
 
 func (d *DockerExecutor) SetRunnerContainer(image string) error {
-	d.runnerContainerName = image
+	d.runnerContainerImage = image
 	return nil
 }
 
@@ -117,11 +117,12 @@ func (d *DockerExecutor) SetExitChan(exitCh <-chan struct{}) error {
 	return nil
 }
 
+// 启动一个编译容器 并记录容器ID
 func (d *DockerExecutor) EnableCompiler() error {
 	resp, err := d.cli.ContainerCreate(context.Background(), &container.Config{
 		Tty:       true,
 		OpenStdin: true,
-		Image:     d.compilerContainerName,
+		Image:     d.compilerContainerImage,
 	}, &container.HostConfig{
 		Binds: []string{
 			fmt.Sprintf("%s/code:/code", ResourcePath),
@@ -144,12 +145,12 @@ func New(opts ...executor.Option) *DockerExecutor {
 	}
 
 	d := &DockerExecutor{
-		cli:                   cli,
-		compilerContainerName: DefaultCompileContainerName,
-		runnerContainerName:   DefaultRunnerContainerName,
-		runTaskCh:             make(chan runTask, DefaultChannelSize),
-		compileTaskCh:         make(chan compileTask, DefaultChannelSize),
-		verifyTaskCh:          make(chan *judger.Task, DefaultChannelSize),
+		cli:                    cli,
+		compilerContainerImage: DefaultCompileContainerName,
+		runnerContainerImage:   DefaultRunnerContainerName,
+		runTaskCh:              make(chan runTask, DefaultChannelSize),
+		compileTaskCh:          make(chan compileTask, DefaultChannelSize),
+		verifyTaskCh:           make(chan *judger.Task, DefaultChannelSize),
 	}
 
 	for _, opt := range opts {
@@ -165,7 +166,7 @@ func (d *DockerExecutor) Execute() error {
 		select {
 		case <-d.exitCh:
 			d.quit = true
-		case task := <-d.taskCh:
+		case task := <-d.taskCh: // 接收外部传入的任务，并根据任务状态执行
 			//log.Println("execute task: ", task.ID)
 			switch task.Status {
 			case judger.CREATED:
@@ -196,6 +197,7 @@ func (d *DockerExecutor) Compile() {
 	for !d.quit {
 		task := <-d.compileTaskCh
 		//log.Println("compile task: ", task.ID)
+		// 可执行文件相对exe目录的路径 与 源代码文件相对code目录的路径 相同
 		exePath := strings.TrimSuffix(task.CodePath, ".go")
 		err := d.compile(task.CodePath, exePath)
 
@@ -224,7 +226,6 @@ func (d *DockerExecutor) Compile() {
 func (d DockerExecutor) compile(input, output string) error {
 	resp, err := d.cli.ContainerExecCreate(context.Background(), d.compilerContainerID, types.ExecConfig{
 		// disable optimize and inline   -gcflags '-N -l'
-		//Cmd:          []string{"sh", "-c", "go", "build", "-o", fmt.Sprintf("/exe/%s", output), fmt.Sprintf("/code/%s", input)},
 		Cmd:          []string{"sh", "-c",
 			fmt.Sprintf("go build -o /exe/%s /code/%s", output, input)},
 		AttachStderr: true,
@@ -284,7 +285,7 @@ func (d *DockerExecutor) run(task runTask) error {
 				task.InputFileName, strconv.FormatFloat(task.Timeout, 'f', 4, 32), task.OutputFileName),
 		},
 		//Cmd: []string{"sh", "-c", "while true; do sleep 100; done"}, // for debug
-		Image:        d.runnerContainerName,
+		Image:        d.runnerContainerImage,
 		AttachStdout: true,
 		AttachStderr: true,
 	}, &container.HostConfig{
