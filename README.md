@@ -1,6 +1,6 @@
 # 评测机
 ## 结构
-- executor: 将评测分为编译、运行、校验答案 三个阶段
+- executor: 将评测分为编译、运行、校验答案 三个阶段，支持CPU、内存、时间限制，但对容器的内存限制至少为6MB
   - `EnableCompiler`会运行一个编译用的go容器，之后才能使用编译功能，所有编译工作都在该容器处理
   - 每次运行编译生成的可执行文件，都会启动一个专门运行该文件的容器，以实现环境隔离
   - 通过channel传递外部传入的评测任务、内部的编译、运行、校验任务
@@ -22,10 +22,22 @@
 - 恶意系统调用: 
   - 删除文件: 以只读方式挂载可执行文件和输入目录，输出目录由于只挂载该用户的目录，即使删除（以及`/bin`等目录）也不会影响到其他人。
   - ...
+- 容器启动失败:
+  ```
+  Error response from daemon: OCI runtime create failed: 
+  container_linux.go:370:starting container process caused: 
+  process_linux.go:459: container init caused: 
+  process_linux.go:422: setting cgroup config for procHooks process caused: failed to write "16777216" to "/sys/fs/cgroup/memory/docker/ID/memory.memsw.limit_in_bytes": write /sys/fs/cgroup/memory/docker/ID/memory.memsw.limit_in_bytes: device or resource busy: unknown
+  ```
+  16777216，即 16MB，是 task中声明的8MB的memory限制的两倍，而写入文件是`memory.memsw.limit_in_bytes`，即包含swap的总内存，swap内存大小也是8MB，由于运行可执行文件很快，因此禁用swap。
+
+  参考[该回答](https://unix.stackexchange.com/questions/412040/cgroups-memory-limit-write-error-device-or-resource-busy) ，可能是因为容器当时使用了超过我们设置的内存限制，导致容器只是处于created状态，而无法执行.
+  
+  解决方法: 容器内存限制最小设置为16MB.
 
 ### TODO
 - 异常情况下的`Msg`还需要处理
-
+- docker服务未启动下的错误处理: 触发`ErrUnknown`类型的错误
 
 ## 缺点
 - 需要运行所有测试用例，无法在某个用例出现问题时提前中止

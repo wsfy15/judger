@@ -46,7 +46,7 @@ func TestDockerExecutor_Run(t *testing.T) {
 				CpuPeriod:  100000,
 				CpuQuota:   50000,
 				Timeout:    1.0,
-				Memory:     8 << 20, // 8 MB
+				Memory:     16 << 20, // 16 MB
 				Status:     judger.CREATED,
 			})
 		}
@@ -61,7 +61,7 @@ func TestDockerExecutor_Run(t *testing.T) {
 		//tasks[6].CodePath = "rm.go"
 
 		for i := 0; i < n; i++ {
-			log.Println("put task: ", i)
+			//log.Println("put task: ", i)
 			taskCh <- &tasks[i]
 		}
 

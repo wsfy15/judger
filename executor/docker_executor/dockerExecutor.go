@@ -311,13 +311,14 @@ func (d *DockerExecutor) run(task runTask) error {
 		},
 		//AutoRemove: true,
 		Resources: container.Resources{
-			Memory:    task.Memory,
-			CPUPeriod: task.CpuPeriod,
-			CPUQuota:  task.CpuQuota,
+			Memory:     task.Memory,
+			MemorySwap: task.Memory,
+			CPUPeriod:  task.CpuPeriod,
+			CPUQuota:   task.CpuQuota,
 		},
 	}, nil, nil, "")
 	if err != nil {
-		log.Println(err)
+		log.Println(task.ID, err)
 		return err
 	}
 
@@ -327,16 +328,17 @@ func (d *DockerExecutor) run(task runTask) error {
 		Stderr: true,
 	})
 	if err != nil {
-		log.Println(err)
+		log.Println(task.ID, err)
 	}
 
 	if err = d.cli.ContainerStart(context.Background(), resp.ID, types.ContainerStartOptions{}); err != nil {
+		log.Println(task.ID, err)
 		return err
 	}
 
 	status, err := d.exec(resp.ID)
 	if err != nil {
-		log.Println(err)
+		log.Println(task.ID, err)
 		return err
 	}
 
