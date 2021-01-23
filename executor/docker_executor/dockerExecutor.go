@@ -6,6 +6,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 	"judger"
 	"judger/errors"
 	"judger/executor"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -57,6 +59,7 @@ type DockerExecutor struct {
 	verifyTaskCh  chan *judger.Task
 
 	verifier verifier.Verifier
+	sync.Mutex
 
 	cli                    *client.Client // docker client
 	compilerContainerImage string
@@ -117,25 +120,8 @@ func (d *DockerExecutor) SetExitChan(exitCh <-chan struct{}) error {
 	return nil
 }
 
-// 启动一个编译容器 并记录容器ID
 func (d *DockerExecutor) EnableCompiler() error {
-	resp, err := d.cli.ContainerCreate(context.Background(), &container.Config{
-		Tty:       true,
-		OpenStdin: true,
-		Image:     d.compilerContainerImage,
-	}, &container.HostConfig{
-		Binds: []string{
-			fmt.Sprintf("%s/code:/code", ResourcePath),
-			fmt.Sprintf("%s/exe:/exe", ResourcePath),
-		},
-	}, nil, nil, "")
-	if err != nil {
-		return err
-	}
-
-	d.compilerContainerID = resp.ID
-	err = d.cli.ContainerStart(context.Background(), resp.ID, types.ContainerStartOptions{})
-	return err
+	return d.startCompiler()
 }
 
 func New(opts ...executor.Option) *DockerExecutor {
@@ -223,38 +209,56 @@ func (d *DockerExecutor) Compile() {
 	}
 }
 
-func (d DockerExecutor) compile(input, output string) error {
+func (d *DockerExecutor) compile(input, output string) error {
+	var rerun bool
+	var err error
+
 	// 保证目录存在
 	outputDir := filepath.Dir(output)
-	if outputDir != "" {
+	if outputDir != "." {
 		utils.CheckDirectoryExist(fmt.Sprintf("%s/exe/%s", ResourcePath, outputDir))
 	}
 
 	resp, err := d.cli.ContainerExecCreate(context.Background(), d.compilerContainerID, types.ExecConfig{
 		// disable optimize and inline   -gcflags '-N -l'
-		Cmd:          []string{"sh", "-c",
+		Cmd: []string{"sh", "-c",
 			fmt.Sprintf("go build -o /exe/%s /code/%s", output, input)},
 		AttachStderr: true,
 		AttachStdout: true,
 	})
-	if err != nil {
+	if rerun, err = d.checkCompilerError(err); err != nil {
 		return err
+	} else if rerun {
+		return d.compile(input, output)
 	}
 
 	response, err := d.cli.ContainerExecAttach(context.Background(), resp.ID, types.ExecStartCheck{})
-	if err != nil {
+	if rerun, err = d.checkCompilerError(err); err != nil {
 		return err
+	} else if rerun {
+		return d.compile(input, output)
 	}
 	defer response.Close()
 
-	commandOutput, err := utils.ReadFromBIO(response.Reader)
-	if err != nil {
+	err = d.cli.ContainerExecStart(context.Background(), resp.ID, types.ExecStartCheck{})
+	if rerun, err = d.checkCompilerError(err); err != nil {
 		return err
+	} else if rerun {
+		return d.compile(input, output)
+	}
+
+	commandOutput, err := utils.ReadFromBIO(response.Reader)
+	if rerun, err = d.checkCompilerError(err); err != nil {
+		return err
+	} else if rerun {
+		return d.compile(input, output)
 	}
 
 	inspect, err := d.cli.ContainerExecInspect(context.Background(), resp.ID)
-	if err != nil {
+	if rerun, err = d.checkCompilerError(err); err != nil {
 		return err
+	} else if rerun {
+		return d.compile(input, output)
 	}
 	if inspect.ExitCode != 0 {
 		return errors.New(errors.CE, commandOutput)
@@ -285,7 +289,7 @@ func (d *DockerExecutor) Run() {
 
 func (d *DockerExecutor) run(task runTask) error {
 	// 保证目录存在
-	if task.OutputDirName != "" {
+	if task.OutputDirName != "." {
 		utils.CheckDirectoryExist(fmt.Sprintf("%s/output/%s", ResourcePath, task.OutputDirName))
 	}
 
@@ -365,7 +369,7 @@ func (d *DockerExecutor) Verify() {
 		task := <-d.verifyTaskCh
 		log.Println("verify task: ", task.ID)
 		_, err := d.verifier.Verify(fmt.Sprintf("%s/output/%s", ResourcePath, task.OutputPath),
-		 fmt.Sprintf("%s/answer/%s", ResourcePath, task.AnswerPath))
+			fmt.Sprintf("%s/answer/%s", ResourcePath, task.AnswerPath))
 
 		d.resultCh <- judger.Result{
 			ID:      task.ID,
@@ -375,7 +379,7 @@ func (d *DockerExecutor) Verify() {
 	}
 }
 
-func (d DockerExecutor) exec(id string) (container.ContainerWaitOKBody, error) {
+func (d *DockerExecutor) exec(id string) (container.ContainerWaitOKBody, error) {
 	statusCh, errCh := d.cli.ContainerWait(context.Background(), id, container.WaitConditionNotRunning)
 
 	select {
@@ -384,4 +388,49 @@ func (d DockerExecutor) exec(id string) (container.ContainerWaitOKBody, error) {
 	case status := <-statusCh:
 		return status, nil
 	}
+}
+
+// 启动一个编译容器 并记录容器ID
+func (d *DockerExecutor) startCompiler() error {
+	resp, err := d.cli.ContainerCreate(context.Background(), &container.Config{
+		Tty:       true,
+		OpenStdin: true,
+		Image:     d.compilerContainerImage,
+	}, &container.HostConfig{
+		Binds: []string{
+			fmt.Sprintf("%s/code:/code", ResourcePath),
+			fmt.Sprintf("%s/exe:/exe", ResourcePath),
+		},
+	}, nil, nil, "")
+	if err != nil {
+		return err
+	}
+
+	d.compilerContainerID = resp.ID
+	return d.cli.ContainerStart(context.Background(), resp.ID, types.ContainerStartOptions{})
+}
+
+func (d *DockerExecutor) restartCompiler() error {
+	d.Lock()
+	defer d.Unlock()
+
+	_, err := d.cli.ContainerInspect(context.Background(), d.compilerContainerID)
+	if errdefs.IsNotFound(err) {
+		return d.startCompiler()
+	}
+	return err
+}
+
+// if recover from error by restarting compiler, and restart success, then need to rerun
+// if fail to restart compiler, don't rerun
+func (d *DockerExecutor) checkCompilerError(err error) (rerun bool, e error) {
+	if err == nil {
+		return false, nil
+	}
+
+	log.Println("compiler error: ", err)
+	if err = d.restartCompiler(); err != nil {
+		return false, err
+	}
+	return true, nil
 }

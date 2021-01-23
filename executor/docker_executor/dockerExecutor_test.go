@@ -35,7 +35,7 @@ func TestDockerExecutor_Run(t *testing.T) {
 	}
 
 	go func() {
-		var n = 5
+		var n = 6
 		var tasks []judger.Task
 		for i := 0; i < n; i++ {
 			tasks = append(tasks, judger.Task{
@@ -51,14 +51,14 @@ func TestDockerExecutor_Run(t *testing.T) {
 			})
 		}
 
-		//tasks[0].CodePath = "success.go"
 		// 由于judger运行在windows环境，docker 运行在wsl中，使用filepath.Join 生成的path不适用于linux环境
 		tasks[0].CodePath = "1//success.go" // filepath.Join("1", "success.go")
 		tasks[1].CodePath = "out_of_bound.go"
-		//tasks[2].CodePath = "rm.go"
 		tasks[2].CodePath = "oom.go"
 		tasks[3].CodePath = "ce.go"
 		tasks[4].CodePath = "timeout.go"
+		tasks[5].CodePath = "success.go"
+		//tasks[6].CodePath = "rm.go"
 
 		for i := 0; i < n; i++ {
 			log.Println("put task: ", i)
