@@ -44,3 +44,11 @@ func New(code JudgerError, msg string) Err {
 		Msg:  msg,
 	}
 }
+
+func IsError(err error, judgerError JudgerError) bool {
+	e, ok := err.(Err)
+	if !ok {
+		return false
+	}
+	return e.Code == judgerError
+}

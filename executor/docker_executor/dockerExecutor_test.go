@@ -46,7 +46,7 @@ func TestDockerExecutor_Run(t *testing.T) {
 				CpuPeriod:  100000,
 				CpuQuota:   50000,
 				Timeout:    1.0,
-				Memory:     16 << 20, // 16 MB
+				Memory:     16 << 20, // 16 MB for WSL, 8MB for linux like ubuntu、centos
 				Status:     judger.CREATED,
 			})
 		}
@@ -111,7 +111,22 @@ func TestDockerExecutor_PullImage(t *testing.T) {
 
 func TestDockerExecutor_Compile(t *testing.T) {
 	dockerExecutor := New(executor.EnableCompiler())
-	err := dockerExecutor.compile("rm.go", "rm")
+	task := compileTask{
+		Task: &judger.Task{
+			ID:         1,
+			AnswerPath: "1.txt",
+			InputPath:  "1.txt",
+			OutputPath: fmt.Sprintf("1//%v.txt", 1),
+			CpuPeriod:  100000,
+			CpuQuota:   50000,
+			Timeout:    1.0,
+			Memory:     8 << 20, // 16 MB
+			Status:     judger.CREATED,
+			CodePath:   "1//success.go",
+			ExePath:    "1//success",
+		},
+	}
+	err, _ := dockerExecutor.compile(task)
 	if err != nil {
 		log.Fatal(err)
 	}

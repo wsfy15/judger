@@ -40,7 +40,6 @@ type compileTask struct {
 
 type runTask struct {
 	*judger.Task
-	Executable     string
 	InputDirName   string
 	InputFileName  string
 	OutputDirName  string
@@ -164,7 +163,6 @@ func (d *DockerExecutor) Execute() error {
 				outputDir, outputFile := filepath.Split(task.OutputPath)
 				d.runTaskCh <- runTask{
 					Task:           task,
-					Executable:     task.ExePath,
 					InputDirName:   inputDir,
 					InputFileName:  inputFile,
 					OutputDirName:  outputDir,
@@ -184,8 +182,8 @@ func (d *DockerExecutor) Compile() {
 		task := <-d.compileTaskCh
 		//log.Println("compile task: ", task.ID)
 		// 可执行文件相对exe目录的路径 与 源代码文件相对code目录的路径 相同
-		exePath := strings.TrimSuffix(task.CodePath, ".go")
-		err := d.compile(task.CodePath, exePath)
+		task.ExePath = strings.TrimSuffix(task.CodePath, ".go")
+		err, rerun := d.compile(task)
 
 		if err != nil {
 			d.resultCh <- judger.Result{
@@ -196,11 +194,14 @@ func (d *DockerExecutor) Compile() {
 			continue
 		}
 
+		if rerun {
+			continue
+		}
+
 		inputDir, inputFile := filepath.Split(task.InputPath)
 		outputDir, outputFile := filepath.Split(task.OutputPath)
 		d.runTaskCh <- runTask{
 			Task:           task.Task,
-			Executable:     exePath,
 			InputDirName:   inputDir,
 			InputFileName:  inputFile,
 			OutputDirName:  outputDir,
@@ -209,10 +210,16 @@ func (d *DockerExecutor) Compile() {
 	}
 }
 
-func (d *DockerExecutor) compile(input, output string) error {
-	var rerun bool
-	var err error
+func (d *DockerExecutor) compile(task compileTask) (err error, rerun bool) {
+	defer func() {
+		if rerun, err = d.checkCompilerError(err); err != nil {
+			return
+		} else if rerun {
+			d.compileTaskCh <- task
+		}
+	}()
 
+	input, output := task.CodePath, task.ExePath
 	// 保证目录存在
 	outputDir := filepath.Dir(output)
 	if outputDir != "." {
@@ -226,45 +233,35 @@ func (d *DockerExecutor) compile(input, output string) error {
 		AttachStderr: true,
 		AttachStdout: true,
 	})
-	if rerun, err = d.checkCompilerError(err); err != nil {
-		return err
-	} else if rerun {
-		return d.compile(input, output)
+	if err != nil {
+		return
 	}
 
 	response, err := d.cli.ContainerExecAttach(context.Background(), resp.ID, types.ExecStartCheck{})
-	if rerun, err = d.checkCompilerError(err); err != nil {
-		return err
-	} else if rerun {
-		return d.compile(input, output)
+	if err != nil {
+		return
 	}
 	defer response.Close()
 
 	err = d.cli.ContainerExecStart(context.Background(), resp.ID, types.ExecStartCheck{})
-	if rerun, err = d.checkCompilerError(err); err != nil {
-		return err
-	} else if rerun {
-		return d.compile(input, output)
+	if err != nil {
+		return
 	}
 
 	commandOutput, err := utils.ReadFromBIO(response.Reader)
-	if rerun, err = d.checkCompilerError(err); err != nil {
-		return err
-	} else if rerun {
-		return d.compile(input, output)
+	if err != nil {
+		return
 	}
 
 	inspect, err := d.cli.ContainerExecInspect(context.Background(), resp.ID)
-	if rerun, err = d.checkCompilerError(err); err != nil {
-		return err
-	} else if rerun {
-		return d.compile(input, output)
+	if err != nil {
+		return
 	}
 	if inspect.ExitCode != 0 {
-		return errors.New(errors.CE, commandOutput)
+		return errors.New(errors.CE, commandOutput), false
 	}
 
-	return nil
+	return
 }
 
 func (d *DockerExecutor) Run() {
@@ -305,7 +302,7 @@ func (d *DockerExecutor) run(task runTask) error {
 		AttachStderr: true,
 	}, &container.HostConfig{
 		Binds: []string{
-			fmt.Sprintf("%s/exe/%s:/exe:ro", ResourcePath, task.Executable),
+			fmt.Sprintf("%s/exe/%s:/exe:ro", ResourcePath, task.ExePath),
 			fmt.Sprintf("%s/output/%s:/output", ResourcePath, task.OutputDirName),
 			fmt.Sprintf("%s/input/%s:/input:ro", ResourcePath, task.InputDirName),
 		},
@@ -369,7 +366,7 @@ func (d *DockerExecutor) run(task runTask) error {
 func (d *DockerExecutor) Verify() {
 	for !d.quit {
 		task := <-d.verifyTaskCh
-		log.Println("verify task: ", task.ID)
+		//log.Println("verify task: ", task.ID)
 		_, err := d.verifier.Verify(fmt.Sprintf("%s/output/%s", ResourcePath, task.OutputPath),
 			fmt.Sprintf("%s/answer/%s", ResourcePath, task.AnswerPath))
 
@@ -426,8 +423,8 @@ func (d *DockerExecutor) restartCompiler() error {
 // if recover from error by restarting compiler, and restart success, then need to rerun
 // if fail to restart compiler, don't rerun
 func (d *DockerExecutor) checkCompilerError(err error) (rerun bool, e error) {
-	if err == nil {
-		return false, nil
+	if err == nil || errors.IsError(err, errors.CE) {
+		return
 	}
 
 	log.Println("compiler error: ", err)
