@@ -3,6 +3,8 @@ package docker_executor
 import (
 	"context"
 	"fmt"
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/client"
 	"io"
 	"judger"
 	"judger/executor"
@@ -12,9 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
+	"time"
 )
 
 func init() {
@@ -22,22 +22,27 @@ func init() {
 }
 
 func TestDockerExecutor_Run(t *testing.T) {
-	taskCh, resultCh, exitCh := make(chan *judger.Task), make(chan judger.Result), make(chan struct{})
+	taskCh, resultCh := make(chan *judger.Task), make(chan judger.Result, 100)
 	var options = []executor.Option{
 		executor.EnableCompiler(),
-		executor.WithResultChan(resultCh),
-		executor.WithTaskChan(taskCh),
-		executor.WithCompileConcurrency(3),
-		executor.WithRunConcurrency(3),
-		executor.WithExitChan(exitCh),
-		executor.WithVerifyConcurrency(3),
+		executor.WithResultChan(resultCh),  // 必须项
+		executor.WithTaskChan(taskCh),      // 必须项
+		executor.WithCompileConcurrency(3), // 必须项
+		executor.WithRunConcurrency(3),     // 必须项
+		executor.WithVerifyConcurrency(3),  // 必须项
 		executor.WithVerifier(verifier.StandardVerifier{}),
 	}
+	dockerExecutor := New(options...)
+
+	ch := make(chan struct{})
+	//go func() {
+	//	ch <- struct{}{}
+	//}()
 
 	go func() {
-		var n = 6
+		var n = 2
 		var tasks []judger.Task
-		for i := 0; i < n; i++ {
+		for i := 0; i < 7; i++ {
 			tasks = append(tasks, judger.Task{
 				ID:         i,
 				AnswerPath: "1.txt",
@@ -46,7 +51,7 @@ func TestDockerExecutor_Run(t *testing.T) {
 				CpuPeriod:  100000,
 				CpuQuota:   50000,
 				Timeout:    1.0,
-				Memory:     16 << 20, // 16 MB for WSL, 8MB for linux like ubuntu、centos
+				Memory:     20 << 20, // 20 MB for WSL, 10MB for linux like ubuntu、centos
 				Status:     judger.CREATED,
 			})
 		}
@@ -58,11 +63,18 @@ func TestDockerExecutor_Run(t *testing.T) {
 		tasks[3].CodePath = "ce.go"
 		tasks[4].CodePath = "timeout.go"
 		tasks[5].CodePath = "success.go"
-		//tasks[6].CodePath = "rm.go"
+		tasks[6].CodePath = "rm.go"
 
 		for i := 0; i < n; i++ {
-			//log.Println("put task: ", i)
+			log.Println("put task: ", i)
 			taskCh <- &tasks[i]
+		}
+
+		//<- ch
+		time.Sleep(time.Second * 2)
+		log.Println("destroy start")
+		if err := dockerExecutor.Destroy(false); err != nil {
+			log.Println(err)
 		}
 
 		for i := 0; i < n; i++ {
@@ -70,13 +82,15 @@ func TestDockerExecutor_Run(t *testing.T) {
 			log.Println(res)
 		}
 
-		exitCh <- struct{}{}
+		ch <- struct{}{}
 	}()
 
-	dockerExecutor := New(options...)
+	log.Println("start executing")
 	if err := dockerExecutor.Execute(); err != nil {
 		log.Println(err)
 	}
+	log.Println("stop execute")
+	<-ch
 }
 
 func TestDockerExecutor_Exec(t *testing.T) {

@@ -18,12 +18,13 @@ type Executor interface {
 
 	SetTaskChan(taskCh <-chan *judger.Task) error
 
-	SetExitChan(exitCh <-chan struct{}) error
-
+	// 编译阶段的goroutine数量  如果设置了n>0 且 没有启动编译容器，会自动启动编译容器
 	SetCompileConcurrency(n int) error
 
+	// 执行阶段的goroutine数量
 	SetRunConcurrency(n int) error
 
+	// 校验阶段的goroutine数量
 	SetVerifyConcurrency(n int) error
 
 	// 启动编译容器
@@ -31,4 +32,7 @@ type Executor interface {
 
 	// 运行Executor
 	Execute() error
+
+	// 销毁Executor，立即销毁 或者 停止接收外部task 并 等待内部task执行完成
+	Destroy(force bool) error
 }

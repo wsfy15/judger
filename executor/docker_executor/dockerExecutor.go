@@ -34,31 +34,28 @@ func init() {
 	ResourcePath = os.Getenv("Resource")
 }
 
-type compileTask struct {
-	*judger.Task
-}
+type Status int
 
-type runTask struct {
-	*judger.Task
-	InputDirName   string
-	InputFileName  string
-	OutputDirName  string
-	OutputFileName string
-}
+const (
+	CREATED Status = iota
+	RUNNING
+	DESTROYING // 等待所有任务结束
+	DESTROYED  // 已销毁，不能使用
+)
 
 var _ executor.Executor = (*DockerExecutor)(nil)
 
 type DockerExecutor struct {
+	sync.Mutex
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+
 	resultCh chan<- judger.Result
 	taskCh   <-chan *judger.Task
-	exitCh   <-chan struct{}
 
-	runTaskCh     chan runTask
-	compileTaskCh chan compileTask
-	verifyTaskCh  chan *judger.Task
-
-	verifier verifier.Verifier
-	sync.Mutex
+	compileTaskCh compileTaskChan
+	runTaskCh     runTaskChan
+	verifyTaskCh  verifyTaskChan
 
 	cli                    *client.Client // docker client
 	compilerContainerImage string
@@ -66,29 +63,54 @@ type DockerExecutor struct {
 	runnerContainerImage   string
 	quit                   bool
 	enableCompile          bool
+	verifier               verifier.Verifier
+	status                 Status
 }
 
+/****  Initialization      *****/
 func (d *DockerExecutor) SetVerifier(v verifier.Verifier) error {
 	d.verifier = v
 	return nil
 }
 
+// 如果设置了n>0 且 没有启动编译容器，会自动启动编译容器
 func (d *DockerExecutor) SetCompileConcurrency(n int) error {
+	if n <= 0 {
+		return fmt.Errorf("if set, compile concurrency must be greater than 0, but received %v", n)
+	}
+
+	if d.compilerContainerID == "" {
+		if err := d.startCompiler(); err != nil {
+			return err
+		}
+	}
+
 	for i := 0; i < n; i++ {
+		d.compileTaskCh.Add(1)
 		go d.Compile()
 	}
 	return nil
 }
 
 func (d *DockerExecutor) SetRunConcurrency(n int) error {
+	if n <= 0 {
+		return fmt.Errorf("if set, run concurrency must be greater than 0, but received %v", n)
+	}
+
 	for i := 0; i < n; i++ {
+		d.runTaskCh.Add(1)
 		go d.Run()
 	}
 	return nil
 }
 
 func (d *DockerExecutor) SetVerifyConcurrency(n int) error {
+	if n <= 0 {
+		return fmt.Errorf("if set, verify concurrency must be greater than 0, but received %v", n)
+	}
+
 	for i := 0; i < n; i++ {
+		d.verifyTaskCh.Add(1)
 		go d.Verify()
 	}
 	return nil
@@ -114,13 +136,11 @@ func (d *DockerExecutor) SetTaskChan(taskCh <-chan *judger.Task) error {
 	return nil
 }
 
-func (d *DockerExecutor) SetExitChan(exitCh <-chan struct{}) error {
-	d.exitCh = exitCh
-	return nil
-}
-
 func (d *DockerExecutor) EnableCompiler() error {
-	return d.startCompiler()
+	if d.compilerContainerID == "" {
+		return d.startCompiler()
+	}
+	return nil
 }
 
 func New(opts ...executor.Option) *DockerExecutor {
@@ -129,13 +149,18 @@ func New(opts ...executor.Option) *DockerExecutor {
 		panic(err)
 	}
 
+	ctx, cancelFunc := context.WithCancel(context.Background())
 	d := &DockerExecutor{
+		ctx:                    ctx,
+		cancelFunc:             cancelFunc,
 		cli:                    cli,
 		compilerContainerImage: DefaultCompileContainerName,
 		runnerContainerImage:   DefaultRunnerContainerName,
-		runTaskCh:              make(chan runTask, DefaultChannelSize),
-		compileTaskCh:          make(chan compileTask, DefaultChannelSize),
-		verifyTaskCh:           make(chan *judger.Task, DefaultChannelSize),
+		runTaskCh:              newRunTaskChan(DefaultChannelSize),
+		compileTaskCh:          newCompileTaskChan(DefaultChannelSize),
+		verifyTaskCh:           newVerifyTaskChan(DefaultChannelSize),
+		verifier:               verifier.StandardVerifier{},
+		status:                 CREATED,
 	}
 
 	for _, opt := range opts {
@@ -146,22 +171,58 @@ func New(opts ...executor.Option) *DockerExecutor {
 	return d
 }
 
+/****  Operation      *****/
+func (d *DockerExecutor) Destroy(force bool) error {
+	// 停止所有 goroutine
+	// 如果在RUNNING状态收到退出的信息，说明是强制退出，不会处理内部还有的任务
+	// 如果在DESTROYING状态收到退出的信息，则是非强制退出，可以依次等待每个阶段残留的任务运行完成后再退出
+	//     每个阶段处理完task后，关闭发往下一个阶段的channel
+	if !force {
+		d.status = DESTROYING
+	}
+	d.cancelFunc()
+
+	d.compileTaskCh.Wait()
+	close(d.runTaskCh.ch)
+
+	d.runTaskCh.Wait()
+	close(d.verifyTaskCh.ch)
+
+	d.verifyTaskCh.Wait()
+	d.status = DESTROYED
+
+	// 删除容器
+	log.Println("remove compile container")
+	if d.compilerContainerID != "" {
+		if err := d.cli.ContainerRemove(context.Background(), d.compilerContainerID, types.ContainerRemoveOptions{
+			Force: true,
+		}); err != nil {
+			log.Println(err)
+			return err
+		}
+	}
+	return nil
+}
+
 func (d *DockerExecutor) Execute() error {
-	for !d.quit {
+	d.status = RUNNING
+	for {
 		select {
-		case <-d.exitCh:
-			d.quit = true
+		case <-d.ctx.Done():
+			// compileTaskCh 只有一个sender，所以可以直接关闭
+			close(d.compileTaskCh.ch)
+			return nil
 		case task := <-d.taskCh: // 接收外部传入的任务，并根据任务状态执行
 			//log.Println("execute task: ", task.ID)
 			switch task.Status {
 			case judger.CREATED:
-				d.compileTaskCh <- compileTask{
+				d.compileTaskCh.ch <- compileTask{
 					Task: task,
 				}
 			case judger.COMPILED:
 				inputDir, inputFile := filepath.Split(task.InputPath)
 				outputDir, outputFile := filepath.Split(task.OutputPath)
-				d.runTaskCh <- runTask{
+				d.runTaskCh.ch <- runTask{
 					Task:           task,
 					InputDirName:   inputDir,
 					InputFileName:  inputFile,
@@ -169,44 +230,71 @@ func (d *DockerExecutor) Execute() error {
 					OutputFileName: outputFile,
 				}
 			case judger.EXECUTED:
-				d.verifyTaskCh <- task
+				d.verifyTaskCh.ch <- verifyTask{Task: task}
 			}
 		}
 	}
-
-	return nil
 }
 
 func (d *DockerExecutor) Compile() {
-	for !d.quit {
-		task := <-d.compileTaskCh
-		//log.Println("compile task: ", task.ID)
-		// 可执行文件相对exe目录的路径 与 源代码文件相对code目录的路径 相同
-		task.ExePath = strings.TrimSuffix(task.CodePath, ".go")
-		err, rerun := d.compile(task)
+	defer func() {
+		d.compileTaskCh.Done()
+	}()
 
-		if err != nil {
-			d.resultCh <- judger.Result{
-				ID:      task.ID,
-				Success: false,
-				Error:   err,
+	var task compileTask
+	var ok bool
+	for {
+		select {
+		case <-d.ctx.Done():
+			d.finishCompile()
+			return
+		case task, ok = <-d.compileTaskCh.ch:
+			if !ok {
+				d.finishCompile()
+				return
 			}
-			continue
+			//log.Println("compile task: ", task.ID)
+			d.processCompileTask(task)
 		}
+	}
+}
 
-		if rerun {
-			continue
+func (d *DockerExecutor) finishCompile() {
+	if d.status == DESTROYING { // 非强制退出
+		log.Println("processing left compile task")
+		// compileTaskCh 已关闭，因为带缓冲，处理完channel内剩余task再退出
+		for task := range d.compileTaskCh.ch {
+			d.processCompileTask(task)
 		}
+	}
+}
 
-		inputDir, inputFile := filepath.Split(task.InputPath)
-		outputDir, outputFile := filepath.Split(task.OutputPath)
-		d.runTaskCh <- runTask{
-			Task:           task.Task,
-			InputDirName:   inputDir,
-			InputFileName:  inputFile,
-			OutputDirName:  outputDir,
-			OutputFileName: outputFile,
+func (d *DockerExecutor) processCompileTask(task compileTask) {
+	// 可执行文件相对exe目录的路径 与 源代码文件相对code目录的路径 相同
+	task.ExePath = strings.TrimSuffix(task.CodePath, ".go")
+	err, rerun := d.compile(task)
+
+	if err != nil {
+		d.resultCh <- judger.Result{
+			ID:      task.ID,
+			Success: false,
+			Error:   err,
 		}
+		return
+	}
+
+	if rerun {
+		return
+	}
+
+	inputDir, inputFile := filepath.Split(task.InputPath)
+	outputDir, outputFile := filepath.Split(task.OutputPath)
+	d.runTaskCh.ch <- runTask{
+		Task:           task.Task,
+		InputDirName:   inputDir,
+		InputFileName:  inputFile,
+		OutputDirName:  outputDir,
+		OutputFileName: outputFile,
 	}
 }
 
@@ -215,7 +303,7 @@ func (d *DockerExecutor) compile(task compileTask) (err error, rerun bool) {
 		if rerun, err = d.checkCompilerError(err); err != nil {
 			return
 		} else if rerun {
-			d.compileTaskCh <- task
+			d.compileTaskCh.ch <- task
 		}
 	}()
 
@@ -265,23 +353,52 @@ func (d *DockerExecutor) compile(task compileTask) (err error, rerun bool) {
 }
 
 func (d *DockerExecutor) Run() {
-	for !d.quit {
-		task := <-d.runTaskCh
-		//log.Println("run task: ", task.ID)
-		err := d.run(task)
-		//log.Println("run task finish: ", task.ID, err)
-		if err != nil {
-			d.resultCh <- judger.Result{
-				ID:      task.ID,
-				Success: false,
-				Error:   err,
-			}
-			continue
-		}
+	defer func() {
+		d.runTaskCh.Done()
+	}()
 
-		task.Task.Status = judger.EXECUTED
-		d.verifyTaskCh <- task.Task
+	var task runTask
+	var ok bool
+	for {
+		select {
+		case <-d.ctx.Done():
+			d.finishRun()
+			return
+		case task, ok = <-d.runTaskCh.ch:
+			if !ok {
+				d.finishRun()
+				return
+			}
+			//log.Println("run task: ", task.ID)
+			d.processRunTask(task)
+		}
 	}
+}
+
+func (d *DockerExecutor) finishRun() {
+	if d.status == DESTROYING { // 非强制退出
+		log.Println("processing left run task")
+		// runTaskCh 已关闭，因为带缓冲，处理完channel内剩余task再退出
+		for task := range d.runTaskCh.ch {
+			d.processRunTask(task)
+		}
+	}
+}
+
+func (d *DockerExecutor) processRunTask(task runTask) {
+	err := d.run(task)
+	//log.Println("run task finish: ", task.ID, err)
+	if err != nil {
+		d.resultCh <- judger.Result{
+			ID:      task.ID,
+			Success: false,
+			Error:   err,
+		}
+		return
+	}
+
+	task.Task.Status = judger.EXECUTED
+	d.verifyTaskCh.ch <- verifyTask{Task: task.Task}
 }
 
 func (d *DockerExecutor) run(task runTask) error {
@@ -306,7 +423,7 @@ func (d *DockerExecutor) run(task runTask) error {
 			fmt.Sprintf("%s/output/%s:/output", ResourcePath, task.OutputDirName),
 			fmt.Sprintf("%s/input/%s:/input:ro", ResourcePath, task.InputDirName),
 		},
-		//AutoRemove: true,
+		AutoRemove: true,
 		Resources: container.Resources{
 			Memory:     task.Memory,
 			MemorySwap: task.Memory,
@@ -364,17 +481,46 @@ func (d *DockerExecutor) run(task runTask) error {
 }
 
 func (d *DockerExecutor) Verify() {
-	for !d.quit {
-		task := <-d.verifyTaskCh
-		//log.Println("verify task: ", task.ID)
-		_, err := d.verifier.Verify(fmt.Sprintf("%s/output/%s", ResourcePath, task.OutputPath),
-			fmt.Sprintf("%s/answer/%s", ResourcePath, task.AnswerPath))
+	defer func() {
+		d.verifyTaskCh.Done()
+	}()
 
-		d.resultCh <- judger.Result{
-			ID:      task.ID,
-			Success: err == nil,
-			Error:   err,
+	var task verifyTask
+	var ok bool
+	for {
+		select {
+		case <-d.ctx.Done():
+			d.finishVerify()
+			return
+		case task, ok = <-d.verifyTaskCh.ch:
+			if !ok {
+				d.finishVerify()
+				return
+			}
+			//log.Println("verify task: ", task.ID)
+			d.processVerifyTask(task)
 		}
+	}
+}
+
+func (d *DockerExecutor) finishVerify() {
+	if d.status == DESTROYING { // 非强制退出
+		log.Println("processing left verify task")
+		// verifyTaskCh 已关闭，因为带缓冲，处理完channel内剩余task再退出
+		for task := range d.verifyTaskCh.ch {
+			d.processVerifyTask(task)
+		}
+	}
+}
+
+func (d *DockerExecutor) processVerifyTask(task verifyTask) {
+	_, err := d.verifier.Verify(fmt.Sprintf("%s/output/%s", ResourcePath, task.OutputPath),
+		fmt.Sprintf("%s/answer/%s", ResourcePath, task.AnswerPath))
+
+	d.resultCh <- judger.Result{
+		ID:      task.ID,
+		Success: err == nil,
+		Error:   err,
 	}
 }
 

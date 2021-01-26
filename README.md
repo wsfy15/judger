@@ -8,6 +8,8 @@
   - 需要设置环境变量`Resource`，值为存放`code、input、output、exe、answer`等资源的父目录，例如`mock`目录的路径
   - 支持同时运行多个goroutine执行compile、run、verify工作，具体使用参考`executor\docker_executor\dockerExecutor_test.go`的`TestDockerExecutor_Run`
   - 目前实现通过Docker执行每个阶段的工作，未来可以增加K8s或其他环境
+  - 通过`context`实现多个goroutine的退出，每个goroutine监听的是同一个context变量
+  - 调用`Destroy`销毁后，支持**立即销毁**和**等待内部任务处理完后再销毁（等待过程中停止接收外部传入的任务）**
 - verifier: 比较标准答案和程序输出，保证这些文件都是相同编码，同样的换行(LF)
 - errors: 评测相关的错误，包括编译、运行、校验等过程产生的问题
 
@@ -42,3 +44,7 @@
 ## 缺点
 - 需要运行所有测试用例，无法在某个用例出现问题时提前中止
 - 每个题目只能有一个输入文件，因为运行可执行文件的容器只会执行一次命令，所以所有用例都存储在同一个文件中
+
+## 运行
+若以容器方式运行该应用，需要将宿主机的`/var/run/docker.sock`和`/usr/bin/docker`挂载到容器内相同路径。
+

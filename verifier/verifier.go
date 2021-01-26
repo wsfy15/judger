@@ -15,6 +15,7 @@ type Verifier interface {
 	Verify(outputFileName, answerFileName string) (int, error)
 }
 
+// 适用于 输出 和 答案 按行存储每一个case的场景
 type StandardVerifier struct{}
 
 func (StandardVerifier) Verify(outputFileName, answerFileName string) (cases int, err error) {

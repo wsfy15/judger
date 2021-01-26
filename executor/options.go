@@ -31,7 +31,6 @@ func WithVerifier(v verifier.Verifier) Option {
 	}
 }
 
-
 func WithTaskChan(taskCh <-chan *judger.Task) Option {
 	return func(executor Executor) error {
 		return executor.SetTaskChan(taskCh)
@@ -41,12 +40,6 @@ func WithTaskChan(taskCh <-chan *judger.Task) Option {
 func WithResultChan(resultCh chan<- judger.Result) Option {
 	return func(executor Executor) error {
 		return executor.SetResultChan(resultCh)
-	}
-}
-
-func WithExitChan(exitCh <-chan struct{}) Option {
-	return func(executor Executor) error {
-		return executor.SetExitChan(exitCh)
 	}
 }
 
