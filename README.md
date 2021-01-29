@@ -40,6 +40,7 @@
 ### TODO
 - 异常情况下的`Msg`还需要处理
 - docker服务未启动下的错误处理: 触发`ErrUnknown`类型的错误
+- Executor内部三种类型goroutine的动态扩缩容，可通过channel实现
 
 ## 缺点
 - 需要运行所有测试用例，无法在某个用例出现问题时提前中止

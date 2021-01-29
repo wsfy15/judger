@@ -12,9 +12,9 @@ const (
 )
 
 type Task struct {
-	ID         int
+	ID         int64
 	CodePath   string // 相对code 的路径
-	AnswerPath string // 相对standard_output 的路径
+	AnswerPath string // 相对answer 的路径
 	InputPath  string // 相对input 的路径
 	OutputPath string // 相对output 的路径
 	ExePath    string // 相对exe 的路径
@@ -26,7 +26,7 @@ type Task struct {
 }
 
 type Result struct {
-	ID      int
+	ID      int64
 	Success bool
 	//Message string // error when running executable, eg: OOM
 	Error error // error when executing command

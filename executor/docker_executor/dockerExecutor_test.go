@@ -22,6 +22,7 @@ func init() {
 }
 
 func TestDockerExecutor_Run(t *testing.T) {
+	// 在该Test中，resultCh必须有缓冲，否则Executor在非强制Destroy时会死锁
 	taskCh, resultCh := make(chan *judger.Task), make(chan judger.Result, 100)
 	var options = []executor.Option{
 		executor.EnableCompiler(),
@@ -34,17 +35,15 @@ func TestDockerExecutor_Run(t *testing.T) {
 	}
 	dockerExecutor := New(options...)
 
+	// 用于等待Executor Destroy结束后再退出主协程
 	ch := make(chan struct{})
-	//go func() {
-	//	ch <- struct{}{}
-	//}()
 
 	go func() {
-		var n = 2
+		var n = 6
 		var tasks []judger.Task
 		for i := 0; i < 7; i++ {
 			tasks = append(tasks, judger.Task{
-				ID:         i,
+				ID:         int64(i),
 				AnswerPath: "1.txt",
 				InputPath:  "1.txt",
 				OutputPath: fmt.Sprintf("1//%v.txt", i),
@@ -70,7 +69,6 @@ func TestDockerExecutor_Run(t *testing.T) {
 			taskCh <- &tasks[i]
 		}
 
-		//<- ch
 		time.Sleep(time.Second * 2)
 		log.Println("destroy start")
 		if err := dockerExecutor.Destroy(false); err != nil {
