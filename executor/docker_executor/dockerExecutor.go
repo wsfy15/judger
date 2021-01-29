@@ -570,7 +570,7 @@ func (d *DockerExecutor) restartCompiler() error {
 // if fail to restart compiler, don't rerun
 func (d *DockerExecutor) checkCompilerError(err error) (rerun bool, e error) {
 	if err == nil || errors.IsError(err, errors.CE) {
-		return
+		return false, err
 	}
 
 	log.Println("compiler error: ", err)
